@@ -3,4 +3,6 @@
 /src-tauri/target
 /node_modules
 Cargo.lock
+/brennan-ssh-js/
+/BrennanSSH.dist/
 .DS_Store

@@ -6,9 +6,9 @@ set -e
 PROJECT_DIR="$HOME/BrenSupp/BRUTE"
 cd "$PROJECT_DIR"
 
-echo "=============================================="
-echo "          BRUTE Release Automation Tool       "
-echo "=============================================="
+echo "================================================="
+echo "          BRUTE Release Automation Tool          "
+echo "================================================="
 
 # 1. Fetch latest changes from GitHub to check state
 echo "[1/6] Checking remote repository status..."
