@@ -1,6 +1,6 @@
 [package]
 name = "brute"
-version = "0.0.5"
+version = "0.0.6"
 description = "A Tauri App For Supporting Brennan B2, B3, & B3+"
 authors = ["Milton David Grimshaw"]
 edition = "2024"

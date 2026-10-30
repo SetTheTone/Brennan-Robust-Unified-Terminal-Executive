@@ -38,7 +38,7 @@ pub fn App() -> impl IntoView {
     let (ip_input, set_ip_input) = signal(String::from("Example: 192.168.4.75"));
     let (cmd_input, set_cmd_input) = signal(String::new());
     let (terminal_text, set_terminal_text) = signal(String::from(
-        "[BRUTE v0.0.5] Ready. Enter IP to connect...\n",
+        "[BRUTE v0.0.6] Ready. Enter IP to connect...\n",
     ));
 
     let terminal_ref = NodeRef::<leptos::html::Pre>::new();
