@@ -3,7 +3,7 @@ name: Build BRUTE Multi-Platform
 on:
   push:
     tags:
-      - 'v*' # Triggers whenever you push a tag like v0.0.6
+      - 'v*' # Triggers whenever you push a tag like v0.0.8
 
 jobs:
   build-tauri:
@@ -23,11 +23,11 @@ jobs:
           - platform: macos-13 # Intel macOS
             target: x86_64-apple-darwin
             name: macOS-Intel
-          - platform: macos-14 # Apple Silicon (M-Series)
+          - platform: macos-15 # Apple Silicon (M-Series / upgraded from macos-14)
             target: aarch64-apple-darwin
             name: macOS-ARM64
 
-          # --- LINUX (Bundle / AppImage / Executable) ---
+          # --- LINUX ---
           - platform: ubuntu-22_04
             target: x86_64-unknown-linux-gnu
             name: Linux-AMD64
@@ -57,9 +57,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Install Trunk CLI
-        uses: jetli/trunk-action@v0.16.0
-        with:
-          version: latest
+        run: cargo install trunk
 
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
@@ -72,19 +70,3 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
-
-  build-flatpak:
-    name: Linux Flatpak (AMD64 & ARM64)
-    runs-on: ubuntu-22_04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Build Flatpak via flatpak-builder
-        uses: flatpak/flatpak-github-actions@v6
-        with:
-          bundle: brute.flatpak
-          manifest: flatpak/com.brennan.brute.json # (If you configure a flatpak manifest)
-          arch: x86_64
