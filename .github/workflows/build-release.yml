@@ -65,6 +65,13 @@ jobs:
         with:
           tool: trunk
 
+      - name: Build native wasm-bindgen for Ubuntu 22.04 ARM64 (GLIBC 2.35)
+        if: matrix.platform == 'ubuntu-22.04-arm'
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.130
+          mkdir -p ~/.cache/trunk/wasm-bindgen-0.2.130
+          cp ~/.cargo/bin/wasm-bindgen ~/.cache/trunk/wasm-bindgen-0.2.130/wasm-bindgen
+
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
