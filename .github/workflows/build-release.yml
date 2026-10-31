@@ -3,7 +3,10 @@ name: Build BRUTE Multi-Platform
 on:
   push:
     tags:
-      - 'v*' # Triggers whenever you push a tag like v0.0.6
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build-tauri:
@@ -11,27 +14,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- WINDOWS ---
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             name: Windows-AMD64
           - platform: windows-latest
             target: aarch64-pc-windows-msvc
             name: Windows-ARM64
-
-          # --- macOS ---
-          - platform: macos-13 # Intel macOS
+          - platform: macos-15
             target: x86_64-apple-darwin
             name: macOS-Intel
-          - platform: macos-14 # Apple Silicon (M-Series)
+          - platform: macos-15
             target: aarch64-apple-darwin
             name: macOS-ARM64
-
-          # --- LINUX (Bundle / AppImage / Executable) ---
-          - platform: ubuntu-22_04
+          - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             name: Linux-AMD64
-          - platform: ubuntu-22_04
+          - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             name: Linux-ARM64
 
@@ -45,46 +43,31 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Rust stable
+      - name: Install Rust stable (Native + WASM target)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
 
       - name: Install dependencies (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev pkg-config
 
       - name: Install Trunk CLI
-        uses: jetli/trunk-action@v0.16.0
+        uses: taiki-e/install-action@v2
         with:
-          version: latest
+          tool: trunk
 
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          projectPath: BRUTE
           tagName: ${{ github.ref_name }}
           releaseName: 'BRUTE __VERSION__'
           releaseBody: 'Automated cross-platform release for BRUTE.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
-
-  build-flatpak:
-    name: Linux Flatpak (AMD64 & ARM64)
-    runs-on: ubuntu-22_04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Build Flatpak via flatpak-builder
-        uses: flatpak/flatpak-github-actions@v6
-        with:
-          bundle: brute.flatpak
-          manifest: flatpak/com.brennan.brute.json # (If you configure a flatpak manifest)
-          arch: x86_64
