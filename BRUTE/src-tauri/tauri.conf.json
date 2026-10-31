@@ -9,15 +9,15 @@
     "beforeBuildCommand": "trunk build",
     "frontendDist": "../dist"
   },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "BRUTE - Brennan Robust Unified Terminal Executive",
-        "width": 900,
-        "height": 700
-      }
-    ],
+  "app": {"withGlobalTauri": true,
+    "windows": [ 
+    { 
+		"title": "BRUTE - Brennan Robust Unified Terminal Executive- ", 
+		"width": 1900, 
+		"height": 1350, 
+		"backgroundColor": "#111827" 
+		} 
+		],
     "security": {
       "csp": null
     }

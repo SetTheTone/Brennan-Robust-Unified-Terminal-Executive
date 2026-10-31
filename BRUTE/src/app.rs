@@ -28,15 +28,147 @@ struct ScanArgs {
     hint_ip: String,
 }
 
+#[derive(Serialize)]
+struct SaveDownloadArgs {
+    filename: String,
+    content: String,
+}
+
 #[derive(Deserialize)]
 struct TauriEvent {
     payload: String,
 }
 
+fn is_connect_success(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    !lower.contains("error")
+        && !lower.contains("failed")
+        && !lower.contains("refused")
+        && !lower.contains("timed out")
+}
+
+fn format_brennan_json(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    let json_body = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if end > start => trimmed[start + 1..end].trim(),
+        _ => trimmed
+            .trim_end_matches('#')
+            .trim()
+            .trim_end_matches("/root")
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim(),
+    };
+
+    if json_body.is_empty() {
+        return String::from("# ");
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut depth: usize = 0;
+    let mut escape = false;
+
+    for ch in json_body.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && in_quotes {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if !in_quotes {
+            match ch {
+                '[' | '{' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    let item = current.trim().to_string();
+                    if !item.is_empty() {
+                        tokens.push(item);
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    let last = current.trim().to_string();
+    if !last.is_empty() {
+        tokens.push(last);
+    }
+
+    let mut entries = Vec::new();
+    let mut max_key_len = 0;
+
+    for token in tokens {
+        if let Some((k, v)) = token.split_once(':') {
+            let key = k.trim().to_string();
+            let val = v.trim().to_string();
+            if key.len() > max_key_len {
+                max_key_len = key.len();
+            }
+            entries.push((key, val));
+        } else {
+            entries.push((token, String::new()));
+        }
+    }
+
+    let mut formatted_cells = Vec::new();
+    let mut col_width = 36usize;
+
+    for (k, v) in entries {
+        let cell = if v.is_empty() {
+            k
+        } else {
+            format!("{:<width$} : {}", k, v, width = max_key_len)
+        };
+        if cell.chars().count() + 4 > col_width {
+            col_width = cell.chars().count() + 4;
+        }
+        formatted_cells.push(cell);
+    }
+
+    let mut out = String::new();
+    for pair in formatted_cells.chunks(2) {
+        if pair.len() == 2 {
+            out.push_str(&format!(
+                "{:<width$}{}\n",
+                pair[0],
+                pair[1],
+                width = col_width
+            ));
+        } else {
+            out.push_str(&format!("{}\n", pair[0]));
+        }
+    }
+
+    out.push_str("# ");
+    out
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (ip_input, set_ip_input) = signal(String::from("Example: 192.168.4.75"));
+    let (ip_first_focus, set_ip_first_focus) = signal(true);
     let (cmd_input, set_cmd_input) = signal(String::new());
+    let (connected, set_connected) = signal(false);
     let (terminal_text, set_terminal_text) = signal(String::from(
         "[BRUTE v0.0.6] Ready. Enter IP to connect...\n",
     ));
@@ -51,12 +183,15 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // Listen for live "scandisk-progress" events emitted by the Rust backend
-    // and overwrite the previous "   --->" progress line in-place
+    // Listen for live "scandisk-progress" events (used for both ScanDisk and Reboot progress)
     Effect::new(move |_| {
         spawn_local(async move {
             let closure = Closure::wrap(Box::new(move |event_js: JsValue| {
                 if let Ok(ev) = serde_wasm_bindgen::from_value::<TauriEvent>(event_js) {
+                    if ev.payload.contains("Auto-reconnect successful") {
+                        set_connected.set(true);
+                    }
+
                     set_terminal_text.update(|t| {
                         if ev.payload.starts_with("   --->") {
                             let trimmed = t.trim_end_matches('\n');
@@ -75,26 +210,36 @@ pub fn App() -> impl IntoView {
             closure.forget();
         });
     });
-
-    let handle_connect = move |_| {
+    
+    let do_connect = move || {
         let ip = ip_input.get().trim().to_string();
-        if ip.is_empty() {
-            set_terminal_text.update(|t| t.push_str("\n[Error: Please enter a valid IP Address]\n"));
+        if ip.is_empty() || ip.starts_with("Example:") {
+            set_terminal_text
+                .update(|t| t.push_str("\n[Error: Please enter a valid IP Address]\n"));
             return;
         }
+        set_ip_first_focus.set(false);
         set_terminal_text.update(|t| t.push_str(&format!("\n[Connecting to {}...]\n", ip)));
 
         spawn_local(async move {
             if let Ok(args) = serde_wasm_bindgen::to_value(&ConnectArgs { ip }) {
                 let res = invoke("connect_ssh", args).await;
                 if let Ok(msg) = serde_wasm_bindgen::from_value::<String>(res) {
+                    if is_connect_success(&msg) {
+                        set_connected.set(true);
+                    }
                     set_terminal_text.update(|t| t.push_str(&msg));
                 }
             }
         });
     };
 
+    let handle_connect = move |_| {
+        do_connect();
+    };
+
     let handle_disconnect = move |_| {
+        set_connected.set(false);
         spawn_local(async move {
             let res = invoke("disconnect_ssh", JsValue::NULL).await;
             if let Ok(msg) = serde_wasm_bindgen::from_value::<String>(res) {
@@ -112,6 +257,7 @@ pub fn App() -> impl IntoView {
                 if let Ok(found_ip) = serde_wasm_bindgen::from_value::<String>(res) {
                     if !found_ip.is_empty() && !found_ip.starts_with("Error:") {
                         set_ip_input.set(found_ip.clone());
+                        set_ip_first_focus.set(false);
                         set_terminal_text.update(|t| {
                             t.push_str(&format!(
                                 "\n[Success! Brennan found at: {} — Auto-connecting...]\n",
@@ -119,12 +265,14 @@ pub fn App() -> impl IntoView {
                             ))
                         });
 
-                        // Auto-connect immediately using the discovered IP
                         if let Ok(conn_args) =
                             serde_wasm_bindgen::to_value(&ConnectArgs { ip: found_ip })
                         {
                             let conn_res = invoke("connect_ssh", conn_args).await;
                             if let Ok(msg) = serde_wasm_bindgen::from_value::<String>(conn_res) {
+                                if is_connect_success(&msg) {
+                                    set_connected.set(true);
+                                }
                                 set_terminal_text.update(|t| t.push_str(&msg));
                             }
                         }
@@ -142,12 +290,218 @@ pub fn App() -> impl IntoView {
 
     let run_cmd = move |cmd: &str| {
         let command = cmd.to_string();
-        set_terminal_text.update(|t| t.push_str(&format!("\n$ {}\n", command)));
+        set_terminal_text.update(|t| t.push_str(&format!("{}\n", command)));
         spawn_local(async move {
             if let Ok(args) = serde_wasm_bindgen::to_value(&CommandArgs { command }) {
                 let res = invoke("run_remote_command", args).await;
                 if let Ok(msg) = serde_wasm_bindgen::from_value::<String>(res) {
                     set_terminal_text.update(|t| t.push_str(&msg));
+                }
+            }
+        });
+    };
+
+    let handle_stats = move |_| {
+        let command = String::from("wget -qO- http://127.0.0.1/b2cgi.fcgi?getWebInfo");
+        set_terminal_text.update(|t| t.push_str("Stats\n"));
+        spawn_local(async move {
+            if let Ok(args) = serde_wasm_bindgen::to_value(&CommandArgs { command }) {
+                let res = invoke("run_remote_command", args).await;
+                if let Ok(msg) = serde_wasm_bindgen::from_value::<String>(res) {
+                    let formatted = format_brennan_json(&msg);
+                    set_terminal_text.update(|t| t.push_str(&formatted));
+                }
+            }
+        });
+    };
+
+    let download_brennan_file = move |file_name: &'static str| {
+        let ip = ip_input.get().trim().to_string();
+        let url = format!("http://{}/media/hdd1/{}", ip, file_name);
+        set_terminal_text.update(|t| {
+            t.push_str(&format!(
+                "[Downloading {} from {}...]\n",
+                file_name, url
+            ))
+        });
+
+        let ls_cmd = format!("ls -lt /media/hdd1/{}", file_name);
+        let wget_cmd = format!("wget -qO- {}", url);
+
+        spawn_local(async move {
+            let mut ls_info = String::from("Unavailable");
+            if let Ok(ls_args) = serde_wasm_bindgen::to_value(&CommandArgs { command: ls_cmd }) {
+                let ls_res = invoke("run_remote_command", ls_args).await;
+                if let Ok(raw_ls) = serde_wasm_bindgen::from_value::<String>(ls_res) {
+                    let cleaned_ls = raw_ls.trim_end().trim_end_matches('#').trim();
+                    if !cleaned_ls.is_empty() {
+                        ls_info = cleaned_ls.to_string();
+                    }
+                }
+            }
+
+            if let Ok(args) = serde_wasm_bindgen::to_value(&CommandArgs { command: wget_cmd }) {
+                let res = invoke("run_remote_command", args).await;
+                if let Ok(raw_content) = serde_wasm_bindgen::from_value::<String>(res) {
+                    let cleaned_content = raw_content
+                        .trim_end()
+                        .trim_end_matches('#')
+                        .trim_end();
+
+                    if cleaned_content.starts_with("Error:") || cleaned_content.is_empty() {
+                        set_terminal_text.update(|t| {
+                            t.push_str(&format!(
+                                "[Error: Failed to retrieve {} from {}]\n{}\n# ",
+                                file_name, url, cleaned_content
+                            ))
+                        });
+                        return;
+                    }
+
+                    let now = String::from(
+                        js_sys::Date::new_0().to_locale_string("en-GB", &JsValue::UNDEFINED),
+                    );
+                    let header = format!(
+                        "========================================================\n\
+                         File: {} (Source: {})\n\
+                         File Info (ls -lt): {}\n\
+                         Date and Time Generated: {}\n\
+                         ========================================================\n\n",
+                        file_name, url, ls_info, now
+                    );
+                    let footer = format!(
+                        "\n\n========================================================\n\
+                         End of {}\n\
+                         File Info (ls -lt): {}\n\
+                         Date and Time Generated: {}\n\
+                         ========================================================\n",
+                        file_name, ls_info, now
+                    );
+
+                    let full_content = format!("{}{}{}", header, cleaned_content, footer);
+
+                    if let Ok(save_args) = serde_wasm_bindgen::to_value(&SaveDownloadArgs {
+                        filename: file_name.to_string(),
+                        content: full_content,
+                    }) {
+                        let save_res = invoke("save_to_downloads", save_args).await;
+                        if let Ok(saved_path) = serde_wasm_bindgen::from_value::<String>(save_res) {
+                            set_terminal_text.update(|t| {
+                                t.push_str(&format!(
+                                    "[Success: Saved to {} (Generated: {})]\n# ",
+                                    saved_path, now
+                                ))
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    };
+
+    let handle_debug_log = move |_| {
+        let ip = ip_input.get().trim().to_string();
+        set_terminal_text.update(|t| {
+            t.push_str("[Fetching full dmesg output and saving to DmesgLog...]\n")
+        });
+
+        let command = String::from("dmesg");
+        spawn_local(async move {
+            if let Ok(args) = serde_wasm_bindgen::to_value(&CommandArgs { command }) {
+                let res = invoke("run_remote_command", args).await;
+                if let Ok(raw_content) = serde_wasm_bindgen::from_value::<String>(res) {
+                    let cleaned_content = raw_content
+                        .trim_end()
+                        .trim_end_matches('#')
+                        .trim_end();
+
+                    if cleaned_content.starts_with("Error:") || cleaned_content.is_empty() {
+                        set_terminal_text.update(|t| {
+                            t.push_str(&format!(
+                                "[Error: Failed to retrieve dmesg from {}]\n{}\n# ",
+                                ip, cleaned_content
+                            ))
+                        });
+                        return;
+                    }
+
+                    let now = String::from(
+                        js_sys::Date::new_0().to_locale_string("en-GB", &JsValue::UNDEFINED),
+                    );
+                    let header = format!(
+                        "========================================================\n\
+                         File: DmesgLog (Source: dmesg on {})\n\
+                         Date and Time Generated: {}\n\
+                         ========================================================\n\n",
+                        ip, now
+                    );
+                    let footer = format!(
+                        "\n\n========================================================\n\
+                         End of DmesgLog\n\
+                         Date and Time Generated: {}\n\
+                         ========================================================\n",
+                        now
+                    );
+
+                    let full_content = format!("{}{}{}", header, cleaned_content, footer);
+
+                    if let Ok(save_args) = serde_wasm_bindgen::to_value(&SaveDownloadArgs {
+                        filename: String::from("DmesgLog"),
+                        content: full_content,
+                    }) {
+                        let save_res = invoke("save_to_downloads", save_args).await;
+                        if let Ok(saved_path) = serde_wasm_bindgen::from_value::<String>(save_res) {
+                            set_terminal_text.update(|t| {
+                                t.push_str(&format!(
+                                    "[Success: Saved to {} (Generated: {})]\n# ",
+                                    saved_path, now
+                                ))
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    };
+
+    let handle_save_output = move |_| {
+        let ip = ip_input.get().trim().to_string();
+        let raw_terminal = terminal_text.get();
+        let cleaned_content = raw_terminal.trim_end();
+
+        let now = String::from(
+            js_sys::Date::new_0().to_locale_string("en-GB", &JsValue::UNDEFINED),
+        );
+        let header = format!(
+            "========================================================\n\
+             File: TerminalOutput (Device IP: {})\n\
+             Date and Time Generated: {}\n\
+             ========================================================\n\n",
+            ip, now
+        );
+        let footer = format!(
+            "\n\n========================================================\n\
+             End of TerminalOutput\n\
+             Date and Time Generated: {}\n\
+             ========================================================\n",
+            now
+        );
+
+        let full_content = format!("{}{}{}", header, cleaned_content, footer);
+
+        spawn_local(async move {
+            if let Ok(save_args) = serde_wasm_bindgen::to_value(&SaveDownloadArgs {
+                filename: String::from("TerminalOutput"),
+                content: full_content,
+            }) {
+                let save_res = invoke("save_to_downloads", save_args).await;
+                if let Ok(saved_path) = serde_wasm_bindgen::from_value::<String>(save_res) {
+                    set_terminal_text.update(|t| {
+                        t.push_str(&format!(
+                            "\n[Success: Terminal output saved to {} (Generated: {})]\n# ",
+                            saved_path, now
+                        ))
+                    });
                 }
             }
         });
@@ -162,20 +516,32 @@ pub fn App() -> impl IntoView {
     };
 
     let handle_scandisk = move |_| {
-        set_terminal_text.update(|t| t.push_str("\n--- Initiating ScanDisk ---\n"));
+        set_terminal_text.update(|t| t.push_str("--- Initiating ScanDisk ---\n"));
         spawn_local(async move {
             let _ = invoke("trigger_scandisk", JsValue::NULL).await;
         });
     };
 
     let handle_reboot = move |_| {
-        set_terminal_text.update(|t| t.push_str("\n--- Initiating Reboot ---\n"));
+        set_terminal_text.update(|t| t.push_str("--- Initiating Reboot ---\n"));
+        set_connected.set(false);
         spawn_local(async move {
-            let res = invoke("trigger_reboot", JsValue::NULL).await;
-            if let Ok(err_msg) = serde_wasm_bindgen::from_value::<String>(res) {
-                set_terminal_text.update(|t| t.push_str(&format!("[{}]\n", err_msg)));
-            }
+            let _ = invoke("trigger_reboot", JsValue::NULL).await;
         });
+    };
+
+    let grid_btn_style = move || {
+		let _utility_btn_style = move |bg: &str| {
+            format!(
+                "background: {}; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1.0rem; white-space: nowrap;",
+                bg
+            )
+        };
+        if connected.get() {
+            "background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;"
+        } else {
+            "background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: not-allowed; font-size: 1.0rem; opacity: 0.4;"
+        }
     };
 
     view! {
@@ -193,44 +559,83 @@ pub fn App() -> impl IntoView {
                             type="text"
                             placeholder="192.168.4.75"
                             prop:value=move || ip_input.get()
+                            on:focus=move |_| {
+                                if ip_first_focus.get() {
+                                    set_ip_input.set(String::new());
+                                    set_ip_first_focus.set(false);
+                                }
+                            }
                             on:input=move |ev| set_ip_input.set(event_target_value(&ev))
-                            style="background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; width: 175px;"
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" && !connected.get() {
+                                    do_connect();
+                                }
+                            }
+                            disabled=move || connected.get()
+                            style=move || if !connected.get() {
+                                "background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; width: 175px;"
+                            } else {
+                                "background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; width: 175px; opacity: 0.4; cursor: not-allowed;"
+                            }
                         />
                         <button
                             on:click=handle_connect
-                            style="background: #0891b2; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                            disabled=move || connected.get()
+                            style=move || if !connected.get() {
+                                "background: #0891b2; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                            } else {
+                                "background: #0891b2; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: not-allowed; font-weight: bold; opacity: 0.4;"
+                            }
                         >
                             "Connect"
                         </button>
                         <button
                             on:click=handle_disconnect
-                            style="background: #dc2626; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                            disabled=move || !connected.get()
+                            style=move || if connected.get() {
+                                "background: #dc2626; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                            } else {
+                                "background: #dc2626; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: not-allowed; font-weight: bold; opacity: 0.4;"
+                            }
                         >
                             "Disconnect"
                         </button>
                         <button
                             on:click=handle_scan_subnet
-                            style="background: #4b5563; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
+                            disabled=move || connected.get()
+                            style=move || if !connected.get() {
+                                "background: #4b5563; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;"
+                            } else {
+                                "background: #4b5563; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: not-allowed; opacity: 0.4;"
+                            }
                         >
                             "Scan Subnet"
                         </button>
                     </div>
                 </div>
 
-                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 12px;">
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=handle_reboot>"Reboot"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=handle_scandisk>"Scan Disk"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("wget -qO- http://127.0.0.1/b2cgi.fcgi?status")>"Scan Sonos"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("rm -f /b2db/sonos*")>"Forget Sonos"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("wget -qO- http://127.0.0.1/b2cgi.fcgi?getWebInfo")>"Version"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("wget -qO- http://127.0.0.1/b2cgi.fcgi?getWebInfo")>"Stats"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("df -h && fdisk -l")>"Drive Info"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("cat /proc/net/wireless")>"Wi-Fi dB"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("aplay -l")>"DAC Ver"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("dmesg | tail -n 50")>"Debug Log"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("cat /b2db/b2settings")>"b2Settings"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| run_cmd("head -n 50 /b2db/b2db")>"B2DB"</button>
-                    <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=move |_| set_terminal_text.set(String::from("[Terminal Cleared]\n"))>"Clear Output"</button>
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;">
+                    <div style="flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 6px;">
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_reboot>"Reboot"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_scandisk>"Scan Disk"</button>
+                        // <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("wget -qO- http://127.0.0.1/b2cgi.fcgi?status")>"Scan Sonos"</button>
+                        // <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("rm -f /b2db/sonos*")>"Forget Sonos"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_stats>"Stats"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("df -h && fdisk -l")>"Drive Info"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("iwconfig")>"Wi-Fi dB"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("aplay -l")>"DAC Ver"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| download_brennan_file("b2settings")>"b2Settings"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| download_brennan_file("b2db")>"B2DB"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_debug_log>"Debug Log"</button>
+                        <button style="background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;" on:click=handle_save_output>"Output"</button>
+                    </div>
+
+                    <button
+                        style="background: #dc2626; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1.0rem; white-space: nowrap;"
+                        on:click=move |_| set_terminal_text.set(String::from("[Terminal Cleared]\n# "))
+                    >
+                        "Clear Output"
+                    </button>
                 </div>
 
                 <div style="display: flex; gap: 8px;">
@@ -239,16 +644,26 @@ pub fn App() -> impl IntoView {
                         placeholder="Enter Linux command (e.g. ls -la, pwd, cd /media)..."
                         prop:value=move || cmd_input.get()
                         on:input=move |ev| set_cmd_input.set(event_target_value(&ev))
+                        disabled=move || !connected.get()
                         on:keydown=move |ev| {
-                            if ev.key() == "Enter" {
+                            if ev.key() == "Enter" && connected.get() {
                                 handle_send_cmd(leptos::ev::MouseEvent::new("click").unwrap());
                             }
                         }
-                        style="flex: 1; background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; font-family: monospace;"
+                        style=move || if connected.get() {
+                            "flex: 1; background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; font-family: monospace;"
+                        } else {
+                            "flex: 1; background: #1f2937; color: #f3f4f6; border: 1px solid #4b5563; padding: 6px 10px; border-radius: 4px; font-family: monospace; opacity: 0.4; cursor: not-allowed;"
+                        }
                     />
                     <button
                         on:click=handle_send_cmd
-                        style="background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                        disabled=move || !connected.get()
+                        style=move || if connected.get() {
+                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                        } else {
+                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: not-allowed; font-weight: bold; opacity: 0.4;"
+                        }
                     >
                         "Send"
                     </button>

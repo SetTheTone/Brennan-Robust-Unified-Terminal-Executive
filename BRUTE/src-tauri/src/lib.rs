@@ -2,6 +2,7 @@ use ssh2::Session;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Mutex;
+use tauri::Manager;
 
 pub struct SshState {
     pub session: Mutex<Option<Session>>,
@@ -10,8 +11,38 @@ pub struct SshState {
 }
 
 #[tauri::command]
+fn save_to_downloads(
+    app: tauri::AppHandle,
+    filename: String,
+    content: String,
+) -> Result<String, String> {
+    let download_dir = app
+        .path()
+        .download_dir()
+        .map_err(|e| format!("Could not resolve Downloads directory: {}", e))?;
+
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|e| format!("Failed to create Downloads directory: {}", e))?;
+
+    let file_path = download_dir.join(&filename);
+    std::fs::write(&file_path, content)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn connect_ssh(state: tauri::State<'_, SshState>, ip: String) -> Result<String, String> {
-    let tcp = TcpStream::connect(format!("{}:22", ip))
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
+
+    let addr = format!("{}:22", ip)
+        .to_socket_addrs()
+        .map_err(|e| format!("Invalid IP address: {}", e))?
+        .next()
+        .ok_or("Could not resolve IP address")?;
+
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(4))
         .map_err(|e| format!("TCP connection failed: {}", e))?;
 
     let mut sess = Session::new().map_err(|e| format!("Failed to create SSH session: {}", e))?;
@@ -30,7 +61,7 @@ fn connect_ssh(state: tauri::State<'_, SshState>, ip: String) -> Result<String, 
     *state_dir = String::from("/root");
     *state_ip = ip.clone();
 
-    Ok(format!("[Success! Connected to root@{} via SSH]\n", ip))
+    Ok(format!("[Success! Connected to root@{} via SSH]\n# ", ip))
 }
 
 #[tauri::command]
@@ -44,7 +75,7 @@ fn run_remote_command(
     let mut dir_lock = state.current_dir.lock().unwrap();
     let current_dir = dir_lock.clone();
 
-    let wrapped_cmd = format!("cd {} && {}; pwd", current_dir, command);
+    let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, command);
 
     let mut channel = sess
         .channel_session()
@@ -63,17 +94,28 @@ fn run_remote_command(
     let _ = channel.wait_close();
 
     let mut lines: Vec<&str> = output.lines().collect();
+    while let Some(last_line) = lines.last() {
+        if last_line.trim().is_empty() {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+
     if let Some(last_line) = lines.pop() {
-        if last_line.starts_with('/') {
-            *dir_lock = last_line.trim().to_string();
+        let trimmed_dir = last_line.trim();
+        if trimmed_dir.starts_with('/') {
+            *dir_lock = trimmed_dir.to_string();
+        } else {
+            lines.push(last_line);
         }
     }
 
     let clean_output = lines.join("\n");
-    let final_output = if clean_output.is_empty() {
-        output
+    let final_output = if clean_output.trim().is_empty() {
+        String::from("# ")
     } else {
-        format!("{}\n", clean_output)
+        format!("{}\n# ", clean_output)
     };
 
     Ok(final_output)
@@ -136,7 +178,10 @@ async fn scan_subnet(app: tauri::AppHandle) -> Result<String, String> {
 
     let _ = app.emit(
         "scandisk-progress",
-        format!("[Scanning local network {}.1 through {}.254...]\n", subnet, subnet),
+        format!(
+            "[Scanning local network {}.1 through {}.254...]\n",
+            subnet, subnet
+        ),
     );
 
     for chunk_start in (1..=254).step_by(50) {
@@ -151,7 +196,8 @@ async fn scan_subnet(app: tauri::AppHandle) -> Result<String, String> {
 
             handles.push(tokio::task::spawn_blocking(move || -> Option<String> {
                 let addr: SocketAddr = format!("{}:80", target_ip).parse().ok()?;
-                let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(600)).ok()?;
+                let mut stream =
+                    TcpStream::connect_timeout(&addr, Duration::from_millis(600)).ok()?;
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
                 let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
 
@@ -165,7 +211,10 @@ async fn scan_subnet(app: tauri::AppHandle) -> Result<String, String> {
                 stream.read_to_string(&mut resp).ok()?;
 
                 if resp.contains("200 OK")
-                    && resp.find("\r\n\r\n").map(|p| resp.len() > p + 4).unwrap_or(false)
+                    && resp
+                        .find("\r\n\r\n")
+                        .map(|p| resp.len() > p + 4)
+                        .unwrap_or(false)
                 {
                     Some(target_ip)
                 } else {
@@ -261,7 +310,7 @@ async fn trigger_scandisk(
                             if bg_status.is_empty() || bg_status.to_lowercase() == "idle" {
                                 let _ = app_handle.emit(
                                     "scandisk-progress",
-                                    "\n[Success! Scan Disk Complete!]\n",
+                                    "\n[Success! Scan Disk Complete!]\n# ",
                                 );
                                 break;
                             }
@@ -311,11 +360,13 @@ async fn trigger_reboot(
 
     {
         let mut state_sess = state.session.lock().unwrap();
-        if let Some(sess) = state_sess.as_mut() {
+        if let Some(sess) = state_sess.take() {
+            sess.set_timeout(2000);
             if let Ok(mut channel) = sess.channel_session() {
                 let _ = channel.exec(
-                    "sh -c 'sync && echo s > /proc/sysrq-trigger && echo u > /proc/sysrq-trigger && echo b > /proc/sysrq-trigger'",
+                    "sh -c '(sleep 1; sync; echo s > /proc/sysrq-trigger; echo u > /proc/sysrq-trigger; echo b > /proc/sysrq-trigger) >/dev/null 2>&1 &'",
                 );
+                let _ = channel.close();
             }
         }
     }
@@ -327,18 +378,12 @@ async fn trigger_reboot(
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        use tauri::Manager;
+        let _ = app_handle.emit(
+            "scandisk-progress",
+            "--- Waiting 12s for Brennan to shut down... ---\n",
+        );
+        tokio::time::sleep(Duration::from_secs(12)).await;
 
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        let _ = app_handle.emit("scandisk-progress", "--- Waiting for reboot... ---\n");
-
-        {
-            let ssh_state = app_handle.state::<SshState>();
-            let mut state_sess = ssh_state.session.lock().unwrap();
-            *state_sess = None;
-        }
-
-        tokio::time::sleep(Duration::from_secs(10)).await;
         let _ = app_handle.emit(
             "scandisk-progress",
             "--- Polling for device restart... ---\n",
@@ -347,9 +392,7 @@ async fn trigger_reboot(
         let mut poll_attempts = 0;
 
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
             poll_attempts += 1;
-
             let ip_clone = target_ip.clone();
 
             let reconnect_res = tokio::task::spawn_blocking(move || -> Option<Session> {
@@ -360,9 +403,11 @@ async fn trigger_reboot(
                     .next()?;
                 let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok()?;
                 let mut sess = Session::new().ok()?;
+                sess.set_timeout(4000);
                 sess.set_tcp_stream(tcp);
                 sess.handshake().ok()?;
                 sess.userauth_password("root", "brennan").ok()?;
+                sess.set_timeout(0);
                 Some(sess)
             })
             .await;
@@ -370,7 +415,7 @@ async fn trigger_reboot(
             if let Ok(Some(new_sess)) = reconnect_res {
                 let mut verify_output = String::new();
                 if let Ok(mut channel) = new_sess.channel_session() {
-                    if channel.exec("echo 'reboot successful'").is_ok() {
+                    if channel.exec("echo '[SSH Verified: Brennan is back online]'").is_ok() {
                         let _ = channel.read_to_string(&mut verify_output);
                         let _ = channel.close();
                         let _ = channel.wait_close();
@@ -393,20 +438,27 @@ async fn trigger_reboot(
                     "\n--- Auto-reconnect successful ---\n",
                 );
                 if !verify_output.is_empty() {
-                    let _ = app_handle.emit("scandisk-progress", verify_output);
+                    let _ = app_handle.emit("scandisk-progress", format!("{}# ", verify_output));
+                } else {
+                    let _ = app_handle.emit("scandisk-progress", "# ");
                 }
                 break;
             }
 
             if poll_attempts >= 30 {
-                let _ = app_handle.emit("scandisk-progress", "\n--- Auto-reconnect failed ---\n");
+                let _ = app_handle.emit(
+                    "scandisk-progress",
+                    "\n--- Auto-reconnect failed (timed out) ---\n",
+                );
                 break;
             } else {
                 let _ = app_handle.emit(
                     "scandisk-progress",
-                    format!("   [Poll attempt {}/30...]\n", poll_attempts),
+                    format!("   ---> Waiting for SSH (Attempt {}/30)...\n", poll_attempts),
                 );
             }
+
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
 
@@ -435,6 +487,7 @@ pub fn run() {
             scan_subnet,
             trigger_scandisk,
             trigger_reboot,
+            save_to_downloads,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
