@@ -545,8 +545,7 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <main style="display: flex; flex-direction: column; height: 100vh; padding: 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif;">
-            
+        <main style="display: flex; flex-direction: column; height: 100vh; padding: 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif; border: 2px solid #000000; border-radius: 6px;">  
             <div style="flex: 0 0 auto; padding-bottom: 12px; border-bottom: 1px solid #374151;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
                     <div>
