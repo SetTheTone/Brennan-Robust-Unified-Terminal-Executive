@@ -4,8 +4,7 @@ The **Brennan Robust Unified Terminal Executive**, also known as **BEST**, is a 
 
 
 ***Figure 1**
-<img width="1757" height="403" alt="Screenshot 2026-10-25 13 06 29" src="https://github.com/user-attachments/assets/18d6c2dc-d73f-4aec-b76e-196492cfe9fb" />
-
+<img width="1902" height="465" alt="Brute" src="https://github.com/user-attachments/assets/738d4e70-4fac-47d1-9c18-7f3a22d21b4e" />
 
 **Connect**: Input your IP Address in the **Brennan IP** box and click **Connect** or press **Enter**. An IP Address is a set of numbers in a format similar to **192.168.0.207**, and can be found on the Brennan's display
 
@@ -15,9 +14,8 @@ The **Brennan Robust Unified Terminal Executive**, also known as **BEST**, is a 
 
 **Check for Updates**: TBA.
 
-
 **Figure 2**
-<img width="1759" height="1359" alt="Screenshot 2026-10-25 12 58 46" src="https://github.com/user-attachments/assets/878b51b8-ac34-42bb-9621-3573d15b5ecb" />
+<img width="1902" height="1330" alt="BRUTE2" src="https://github.com/user-attachments/assets/dbac98ae-f894-4942-9a7c-e038fabae33c" />
 
 
 **Disconnect**: Releases the IP Address and allows another IP Address to be connected during a session run.
