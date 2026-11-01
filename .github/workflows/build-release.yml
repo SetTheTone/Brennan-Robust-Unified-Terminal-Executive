@@ -81,6 +81,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'BRUTE __VERSION__'
           releaseBody: 'Automated cross-platform release for BRUTE.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
