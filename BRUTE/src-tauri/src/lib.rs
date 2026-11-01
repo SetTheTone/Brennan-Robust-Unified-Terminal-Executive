@@ -11,6 +11,28 @@ struct SshState {
     ip: Mutex<String>,
 }
 
+/// Strips ANSI escape codes so saved .txt files remain clean plain text
+fn strip_ansi_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next_c) = chars.peek() {
+                    chars.next();
+                    if next_c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Masks a string between its first and last characters with '*'
 fn mask_middle(val: &str) -> String {
     let trimmed = val.trim();
@@ -46,8 +68,11 @@ fn mask_b2settings_wifi_password(content: &str) -> String {
 
         let lower = line.trim().to_lowercase();
 
-        // Brennan b2settings format often has "Wifi SSID" followed by a password key, or "psk" / "pass" / "key"
-        if (lower.contains("wifi") && (lower.contains("pass") || lower.contains("key") || lower.contains("psk") || lower.contains("pwd")))
+        if (lower.contains("wifi")
+            && (lower.contains("pass")
+                || lower.contains("key")
+                || lower.contains("psk")
+                || lower.contains("pwd")))
             || lower.starts_with("psk")
             || lower.starts_with("passphrase")
             || lower.starts_with("password")
@@ -69,7 +94,6 @@ fn mask_b2settings_wifi_password(content: &str) -> String {
                     mask_next_line = true;
                 }
             } else {
-                // Space-separated key and value on the same line (e.g. "wifipass mysecret123")
                 let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
                 if parts.len() == 2 && !parts[1].trim().is_empty() {
                     result.push(format!("{} {}", parts[0], mask_middle(parts[1])));
@@ -133,32 +157,12 @@ async fn save_to_downloads(
     content: String,
 ) -> Result<String, String> {
     let download_dir = app.path().download_dir().ok();
-
-    fn strip_ansi_codes(input: &str) -> String {
-        let mut out = String::with_capacity(input.len());
-        let mut chars = input.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&next_c) = chars.peek() {
-                        chars.next();
-                        if next_c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-            }
-            out.push(c);
-        }
-        out
-    }
+    let stripped = strip_ansi_codes(&content);
 
     let final_content = if filename.to_lowercase().contains("b2settings") {
-        mask_b2settings_wifi_password(&content)
+        mask_b2settings_wifi_password(&stripped)
     } else {
-        content
+        stripped
     };
 
     tokio::task::spawn_blocking(move || save_with_dialog(download_dir, &filename, &final_content))
@@ -210,16 +214,17 @@ fn run_remote_command(
     let mut dir_lock = state.current_dir.lock().unwrap();
     let current_dir = dir_lock.clone();
 
-    let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, command);
-
-    // Automatically add --color=always to ls commands for BusyBox colour output
-    let colored_cmd = if command.trim() == "ls" || command.trim().starts_with("ls ") {
-        format!("ls --color=always {}", &command.trim()[2..])
+    let trimmed_cmd = command.trim();
+    // Enable BusyBox ANSI file-type colouring on interactive ls commands
+    let effective_cmd = if trimmed_cmd == "ls" {
+        String::from("ls --color=always")
+    } else if trimmed_cmd.starts_with("ls ") && !trimmed_cmd.contains("--color") {
+        format!("ls --color=always {}", &trimmed_cmd[3..])
     } else {
-        command.clone()
+        trimmed_cmd.to_string()
     };
 
-    let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, colored_cmd);
+    let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, effective_cmd);
 
     let mut channel = sess
         .channel_session()
@@ -452,10 +457,32 @@ async fn trigger_scandisk(
                             let bg_status = cleaned.split('"').next().unwrap_or("").trim();
 
                             if bg_status.is_empty() || bg_status.to_lowercase() == "idle" {
-                                let _ = app_handle.emit(
-                                    "scandisk-progress",
-                                    "\n[Success! Scan Disk Complete!]\n# ",
-                                );
+                                let b2db_info = {
+                                    let ssh_state = app_handle.state::<SshState>();
+                                    let mut state_sess = ssh_state.session.lock().unwrap();
+                                    let mut out = String::new();
+                                    if let Some(sess) = state_sess.as_mut() {
+                                        if let Ok(mut ch) = sess.channel_session() {
+                                            if ch.exec("ls -lt --full-time /media/hdd1/b2db 2>/dev/null || ls -lt /media/hdd1/b2db").is_ok() {
+                                                let _ = ch.read_to_string(&mut out);
+                                                let _ = ch.close();
+                                                let _ = ch.wait_close();
+                                            }
+                                        }
+                                    }
+                                    out.trim().to_string()
+                                };
+
+                                let msg = if !b2db_info.is_empty() {
+                                    format!(
+                                        "\n[Success! Scan Disk Complete!]\n[b2db File Status: {}]\n# ",
+                                        b2db_info
+                                    )
+                                } else {
+                                    String::from("\n[Success! Scan Disk Complete!]\n# ")
+                                };
+
+                                let _ = app_handle.emit("scandisk-progress", msg);
                                 break;
                             }
 
@@ -502,10 +529,18 @@ async fn trigger_reboot(
         return Err("Not connected to a device IP".into());
     }
 
+    let mut pre_uptime = String::new();
     {
         let mut state_sess = state.session.lock().unwrap();
         if let Some(sess) = state_sess.take() {
             sess.set_timeout(2000);
+            if let Ok(mut up_ch) = sess.channel_session() {
+                if up_ch.exec("uptime").is_ok() {
+                    let _ = up_ch.read_to_string(&mut pre_uptime);
+                    let _ = up_ch.close();
+                    let _ = up_ch.wait_close();
+                }
+            }
             if let Ok(mut channel) = sess.channel_session() {
                 let _ = channel.exec(
                     "sh -c '(sleep 1; sync; echo s > /proc/sysrq-trigger; echo u > /proc/sysrq-trigger; echo b > /proc/sysrq-trigger) >/dev/null 2>&1 &'",
@@ -513,6 +548,14 @@ async fn trigger_reboot(
                 let _ = channel.close();
             }
         }
+    }
+
+    let pre_uptime_trimmed = pre_uptime.trim();
+    if !pre_uptime_trimmed.is_empty() {
+        let _ = app.emit(
+            "scandisk-progress",
+            format!("\n[Uptime before reboot: {}]", pre_uptime_trimmed),
+        );
     }
 
     let _ = app.emit(
@@ -559,7 +602,7 @@ async fn trigger_reboot(
             if let Ok(Some(new_sess)) = reconnect_res {
                 let mut verify_output = String::new();
                 if let Ok(mut channel) = new_sess.channel_session() {
-                    if channel.exec("echo '[SSH Verified: Brennan is back online]'").is_ok() {
+                    if channel.exec("echo '[SSH Verified: Brennan is back online]' && echo \"[Uptime after reboot:  $(uptime)]\"").is_ok() {
                         let _ = channel.read_to_string(&mut verify_output);
                         let _ = channel.close();
                         let _ = channel.wait_close();

@@ -250,7 +250,7 @@ pub fn App() -> impl IntoView {
     let (cmd_input, set_cmd_input) = signal(String::new());
     let (connected, set_connected) = signal(false);
     let (terminal_text, set_terminal_text) = signal(String::from(
-        "[BRUTE v0.0.20] Ready. Enter IP to connect...\n",
+        "[BRUTE v1.0.0] Ready. Enter IP to connect...\n",
     ));
 
     let terminal_ref = NodeRef::<leptos::html::Pre>::new();
@@ -620,7 +620,7 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <main style="display: flex; flex-direction: column; height: 100vh; padding: 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif; border: 12px solid #22d3ee; border-radius: 6px;">
+        <main style="display: flex; flex-direction: column; width: 100vw; height: 100vh; margin: 0; padding: 12px 16px 16px 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif; border-top: none; border-left: 12px solid #22d3ee; border-right: 12px solid #22d3ee; border-bottom: 12px solid #22d3ee; border-radius: 0 0 6px 6px;">
             <div style="flex: 0 0 auto; padding-bottom: 12px; border-bottom: 1px solid #374151;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
                     <div>
@@ -732,11 +732,13 @@ pub fn App() -> impl IntoView {
                         on:click=handle_send_cmd
                         disabled=move || !connected.get()
                         style=move || if connected.get() {
-                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;"
+                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1.0rem; white-space: nowrap;"
                         } else {
-                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: not-allowed; font-weight: bold; opacity: 0.4;"
+                            "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: not-allowed; font-weight: bold; font-size: 1.0rem; white-space: nowrap; opacity: 0.4;"
                         }
-                    />
+                    >
+                        "Send"
+                    </button>
                 </div>
             </div>
 
