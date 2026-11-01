@@ -6,7 +6,7 @@ resolver = "2"
 
 [package]
 name = "brute-ui"
-version = "0.0.6"
+version = "0.0.20"
 edition = "2021"
 
 [dependencies]

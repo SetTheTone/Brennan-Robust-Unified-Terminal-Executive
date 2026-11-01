@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-
+ 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = "invoke")]
@@ -45,6 +45,86 @@ fn is_connect_success(msg: &str) -> bool {
         && !lower.contains("failed")
         && !lower.contains("refused")
         && !lower.contains("timed out")
+}
+
+/// Converts Linux ANSI escape sequences (from `ls --color=always`, etc.) into styled HTML spans
+fn ansi_to_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 256);
+    let mut chars = input.chars().peekable();
+    let mut span_open = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            let mut code_str = String::new();
+            let mut final_char = 'm';
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc.is_ascii_alphabetic() {
+                    final_char = nc;
+                    break;
+                }
+                code_str.push(nc);
+            }
+
+            if final_char == 'm' {
+                if span_open {
+                    out.push_str("</span>");
+                    span_open = false;
+                }
+
+                let mut fg_color: Option<&str> = None;
+                let mut bold = false;
+
+                for part in code_str.split(';') {
+                    match part {
+                        "" | "0" | "00" => {
+                            fg_color = None;
+                            bold = false;
+                        }
+                        "1" | "01" => bold = true,
+                        "31" | "91" => fg_color = Some("#f87171"), // Red: Archives / Broken links / Errors
+                        "32" | "92" => fg_color = Some("#4ade80"), // Green: Executables / Scripts
+                        "33" | "93" => fg_color = Some("#facc15"), // Yellow: Device nodes / FIFOs
+                        "34" | "94" => fg_color = Some("#60a5fa"), // Blue: Directories
+                        "35" | "95" => fg_color = Some("#c084fc"), // Magenta: Media / Audio / Sockets
+                        "36" | "96" => fg_color = Some("#22d3ee"), // Cyan: Symbolic links
+                        "37" | "97" => fg_color = Some("#f9fafb"), // White
+                        _ => {}
+                    }
+                }
+
+                if fg_color.is_some() || bold {
+                    out.push_str("<span style=\"");
+                    if let Some(col) = fg_color {
+                        out.push_str("color:");
+                        out.push_str(col);
+                        out.push(';');
+                    }
+                    if bold {
+                        out.push_str("font-weight:bold;");
+                    }
+                    out.push_str("\">");
+                    span_open = true;
+                }
+            }
+            continue;
+        }
+
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+
+    if span_open {
+        out.push_str("</span>");
+    }
+
+    out
 }
 
 fn format_brennan_json(raw: &str) -> String {
@@ -170,7 +250,7 @@ pub fn App() -> impl IntoView {
     let (cmd_input, set_cmd_input) = signal(String::new());
     let (connected, set_connected) = signal(false);
     let (terminal_text, set_terminal_text) = signal(String::from(
-        "[BRUTE v0.0.6] Ready. Enter IP to connect...\n",
+        "[BRUTE v0.0.20] Ready. Enter IP to connect...\n",
     ));
 
     let terminal_ref = NodeRef::<leptos::html::Pre>::new();
@@ -193,10 +273,10 @@ pub fn App() -> impl IntoView {
                     }
 
                     set_terminal_text.update(|t| {
-                        if ev.payload.starts_with("   --->") {
+                        if ev.payload.starts_with("    --->") {
                             let trimmed = t.trim_end_matches('\n');
                             if let Some(last_nl) = trimmed.rfind('\n') {
-                                if trimmed[last_nl + 1..].starts_with("   --->") {
+                                if trimmed[last_nl + 1..].starts_with("    --->") {
                                     t.truncate(last_nl + 1);
                                 }
                             }
@@ -210,7 +290,7 @@ pub fn App() -> impl IntoView {
             closure.forget();
         });
     });
-    
+
     let do_connect = move || {
         let ip = ip_input.get().trim().to_string();
         if ip.is_empty() || ip.starts_with("Example:") {
@@ -325,7 +405,8 @@ pub fn App() -> impl IntoView {
             ))
         });
 
-        let ls_cmd = format!("ls -lt /media/hdd1/{}", file_name);
+        // Pass --color=never so the saved file header metadata stays plain text
+        let ls_cmd = format!("ls --color=never -lt /media/hdd1/{}", file_name);
         let wget_cmd = format!("wget -qO- {}", url);
 
         spawn_local(async move {
@@ -531,12 +612,6 @@ pub fn App() -> impl IntoView {
     };
 
     let grid_btn_style = move || {
-		let _utility_btn_style = move |bg: &str| {
-            format!(
-                "background: {}; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1.0rem; white-space: nowrap;",
-                bg
-            )
-        };
         if connected.get() {
             "background: #1f2937; color: #e5e7eb; border: 1px solid #374151; padding: 6px; border-radius: 4px; cursor: pointer; font-size: 1.0rem;"
         } else {
@@ -545,7 +620,7 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <main style="display: flex; flex-direction: column; height: 100vh; padding: 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif; border: 2px solid #000000; border-radius: 6px;">  
+        <main style="display: flex; flex-direction: column; height: 100vh; padding: 16px; box-sizing: border-box; overflow: hidden; background-color: #111827; color: #f3f4f6; font-family: sans-serif; border: 12px solid #22d3ee; border-radius: 6px;">
             <div style="flex: 0 0 auto; padding-bottom: 12px; border-bottom: 1px solid #374151;">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
                     <div>
@@ -617,8 +692,6 @@ pub fn App() -> impl IntoView {
                     <div style="flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 6px;">
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_reboot>"Reboot"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_scandisk>"Scan Disk"</button>
-                        // <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("wget -qO- http://127.0.0.1/b2cgi.fcgi?status")>"Scan Sonos"</button>
-                        // <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("rm -f /b2db/sonos*")>"Forget Sonos"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_stats>"Stats"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("df -h && fdisk -l")>"Drive Info"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("iwconfig")>"Wi-Fi dB"</button>
@@ -663,19 +736,16 @@ pub fn App() -> impl IntoView {
                         } else {
                             "background: #10b981; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: not-allowed; font-weight: bold; opacity: 0.4;"
                         }
-                    >
-                        "Send"
-                    </button>
+                    />
                 </div>
             </div>
 
             <div style="flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; padding-top: 10px;">
                 <pre
                     node_ref=terminal_ref
-                    style="flex: 1 1 auto; margin: 0; background: #000000; color: #4ade80; font-family: monospace; font-size: 1.05rem; padding: 12px; border-radius: 6px; overflow-y: auto; border: 1px solid #1f2937; white-space: pre-wrap; word-break: break-word;"
-                >
-                    {move || terminal_text.get()}
-                </pre>
+                    style="flex: 1 1 auto; margin: 0; background: #000000; color: #e5e7eb; font-family: monospace; font-size: 1.05rem; padding: 12px; border-radius: 6px; overflow-y: auto; border: 1px solid #1f2937; white-space: pre-wrap; word-break: break-word;"
+                    inner_html=move || ansi_to_html(&terminal_text.get())
+                ></pre>
             </div>
 
         </main>

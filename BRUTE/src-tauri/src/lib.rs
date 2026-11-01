@@ -1,34 +1,169 @@
 use ssh2::Session;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 
-pub struct SshState {
-    pub session: Mutex<Option<Session>>,
-    pub current_dir: Mutex<String>,
-    pub ip: Mutex<String>,
+struct SshState {
+    session: Mutex<Option<Session>>,
+    current_dir: Mutex<String>,
+    ip: Mutex<String>,
+}
+
+/// Masks a string between its first and last characters with '*'
+fn mask_middle(val: &str) -> String {
+    let trimmed = val.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    match chars.len() {
+        0 => String::new(),
+        1 => "*".to_string(),
+        2 => format!("{}*", chars[0]),
+        n => {
+            let first = chars[0];
+            let last = chars[n - 1];
+            let stars = "*".repeat(n - 2);
+            format!("{}{}{}", first, stars, last)
+        }
+    }
+}
+
+/// Masks the WiFi password in b2settings content while keeping first and last char
+fn mask_b2settings_wifi_password(content: &str) -> String {
+    let mut result = Vec::new();
+    let mut mask_next_line = false;
+
+    for line in content.lines() {
+        if mask_next_line {
+            if !line.trim().is_empty() {
+                result.push(mask_middle(line));
+            } else {
+                result.push(line.to_string());
+            }
+            mask_next_line = false;
+            continue;
+        }
+
+        let lower = line.trim().to_lowercase();
+
+        // Brennan b2settings format often has "Wifi SSID" followed by a password key, or "psk" / "pass" / "key"
+        if (lower.contains("wifi") && (lower.contains("pass") || lower.contains("key") || lower.contains("psk") || lower.contains("pwd")))
+            || lower.starts_with("psk")
+            || lower.starts_with("passphrase")
+            || lower.starts_with("password")
+            || lower.starts_with("wifi_pass")
+            || lower.starts_with("wifipass")
+        {
+            if let Some((k, v)) = line.split_once(':') {
+                if !v.trim().is_empty() {
+                    result.push(format!("{}: {}", k, mask_middle(v)));
+                    continue;
+                } else {
+                    mask_next_line = true;
+                }
+            } else if let Some((k, v)) = line.split_once('=') {
+                if !v.trim().is_empty() {
+                    result.push(format!("{}={}", k, mask_middle(v)));
+                    continue;
+                } else {
+                    mask_next_line = true;
+                }
+            } else {
+                // Space-separated key and value on the same line (e.g. "wifipass mysecret123")
+                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+                if parts.len() == 2 && !parts[1].trim().is_empty() {
+                    result.push(format!("{} {}", parts[0], mask_middle(parts[1])));
+                    continue;
+                } else {
+                    mask_next_line = true;
+                }
+            }
+        }
+
+        result.push(line.to_string());
+    }
+
+    let mut out = result.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Opens a native OS "Save As" dialog defaulting to Downloads and enforces a .txt extension
+fn save_with_dialog(
+    default_dir: Option<PathBuf>,
+    default_stem: &str,
+    content: &str,
+) -> Result<String, String> {
+    let clean_stem = default_stem
+        .trim_end_matches(".txt")
+        .trim_end_matches(".log");
+    let filename = format!("{}.txt", clean_stem);
+
+    let mut dialog = rfd::FileDialog::new()
+        .set_file_name(&filename)
+        .add_filter("Text Files (*.txt)", &["txt"]);
+
+    if let Some(dir) = default_dir {
+        let _ = std::fs::create_dir_all(&dir);
+        dialog = dialog.set_directory(dir);
+    }
+
+    if let Some(save_path) = dialog.save_file() {
+        let final_path = if save_path.extension().and_then(|e| e.to_str()) != Some("txt") {
+            save_path.with_extension("txt")
+        } else {
+            save_path
+        };
+
+        std::fs::write(&final_path, content)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+
+        Ok(final_path.to_string_lossy().to_string())
+    } else {
+        Err("Save cancelled by user".to_string())
+    }
 }
 
 #[tauri::command]
-fn save_to_downloads(
+async fn save_to_downloads(
     app: tauri::AppHandle,
     filename: String,
     content: String,
 ) -> Result<String, String> {
-    let download_dir = app
-        .path()
-        .download_dir()
-        .map_err(|e| format!("Could not resolve Downloads directory: {}", e))?;
+    let download_dir = app.path().download_dir().ok();
 
-    std::fs::create_dir_all(&download_dir)
-        .map_err(|e| format!("Failed to create Downloads directory: {}", e))?;
+    fn strip_ansi_codes(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&next_c) = chars.peek() {
+                        chars.next();
+                        if next_c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        out
+    }
 
-    let file_path = download_dir.join(&filename);
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    let final_content = if filename.to_lowercase().contains("b2settings") {
+        mask_b2settings_wifi_password(&content)
+    } else {
+        content
+    };
 
-    Ok(file_path.to_string_lossy().to_string())
+    tokio::task::spawn_blocking(move || save_with_dialog(download_dir, &filename, &final_content))
+        .await
+        .map_err(|e| format!("Dialog task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -76,6 +211,15 @@ fn run_remote_command(
     let current_dir = dir_lock.clone();
 
     let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, command);
+
+    // Automatically add --color=always to ls commands for BusyBox colour output
+    let colored_cmd = if command.trim() == "ls" || command.trim().starts_with("ls ") {
+        format!("ls --color=always {}", &command.trim()[2..])
+    } else {
+        command.clone()
+    };
+
+    let wrapped_cmd = format!("cd {} && {}; printf '\\n'; pwd", current_dir, colored_cmd);
 
     let mut channel = sess
         .channel_session()
@@ -323,9 +467,9 @@ async fn trigger_scandisk(
                                     .collect();
 
                                 let display_msg = if !digits.is_empty() {
-                                    format!("   ---> Scanning Disk Files {}\n", digits)
+                                    format!("    ---> Scanning Disk Files {}\n", digits)
                                 } else {
-                                    format!("   ---> {}\n", bg_status)
+                                    format!("    ---> {}\n", bg_status)
                                 };
 
                                 let _ = app_handle.emit("scandisk-progress", display_msg);
@@ -454,7 +598,7 @@ async fn trigger_reboot(
             } else {
                 let _ = app_handle.emit(
                     "scandisk-progress",
-                    format!("   ---> Waiting for SSH (Attempt {}/30)...\n", poll_attempts),
+                    format!("    ---> Waiting for SSH (Attempt {}/30)...\n", poll_attempts),
                 );
             }
 
