@@ -250,7 +250,7 @@ pub fn App() -> impl IntoView {
     let (cmd_input, set_cmd_input) = signal(String::new());
     let (connected, set_connected) = signal(false);
     let (terminal_text, set_terminal_text) = signal(String::from(
-        "[BRUTE v1.0.0] Ready. Enter IP to connect...\n",
+        "[BRUTE v1.0.1] Ready. Enter IP to connect...\n",
     ));
 
     let terminal_ref = NodeRef::<leptos::html::Pre>::new();
@@ -693,7 +693,7 @@ pub fn App() -> impl IntoView {
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_reboot>"Reboot"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_scandisk>"Scan Disk"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=handle_stats>"Stats"</button>
-                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("df -h && fdisk -l")>"Drive Info"</button>
+                        <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("df -h && fdisk -l && mount")>"Disk Info"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("iwconfig")>"Wi-Fi dB"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| run_cmd("aplay -l")>"DAC Ver"</button>
                         <button disabled=move || !connected.get() style=grid_btn_style on:click=move |_| download_brennan_file("b2settings")>"b2Settings"</button>

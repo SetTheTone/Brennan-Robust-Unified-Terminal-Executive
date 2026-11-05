@@ -46,7 +46,7 @@ PRESENT_VER=$(python3 -c "import json; print(json.load(open('$FILE_TAURI_CONF'))
     || fail_with_reason "Read Present Version" "$PRESENT_VER"
 
 # 4. Get the highest version tag from Git (stripping leading 'v')
-LATEST_TAG=$(git tag -l "v*" | sort -V | tail -n 1)
+LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)
 LATEST_REL_VER="${LATEST_TAG#v}"
 
 if [[ -z "$LATEST_REL_VER" ]]; then
