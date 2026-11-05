@@ -4,3 +4,6 @@
 /node_modules
 Cargo.lock
 .DS_Store
+brennan-ssh-js
+brennan-ssh-js/
+brennan-ssh-sh
